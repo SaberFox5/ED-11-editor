@@ -25,12 +25,135 @@
 #define BTN_ROW   0
 #define BTN_COLS  6
 
-static const Color PHOS    = { 51, 255, 102, 255 };
-static const Color PHOS_BG = { 0, 0, 0, 255 };
+/* ---------- texto e cursor ---------- */
 
-static char lines[MAX_LINES][LINE_LEN];
-static int  numLines = 1;
-static int  curRow = 0, curCol = 0, topRow = 0;
+typedef struct {
+    char lines[MAX_LINES][LINE_LEN];
+    int  numLines;
+    int  curRow, curCol, topRow;
+} Buffer;
+
+/* é global para não ocupar a pilha */
+static Buffer buf;
+
+static void buf_init(Buffer *b) {
+    memset(b, 0, sizeof *b);
+    b->numLines = 1;
+}
+
+static void buf_insertChar(Buffer *b, int c) {
+    int len = (int)strlen(b->lines[b->curRow]);
+    if (len >= LINE_LEN - 1 || c < 32 || c > 126) return;
+    memmove(&b->lines[b->curRow][b->curCol + 1],
+            &b->lines[b->curRow][b->curCol],
+            len - b->curCol + 1);
+    b->lines[b->curRow][b->curCol] = (char)c;
+    b->curCol++;
+}
+
+static void buf_newLine(Buffer *b) {
+    if (b->numLines >= MAX_LINES) return;
+    for (int i = b->numLines; i > b->curRow + 1; i--)
+        strcpy(b->lines[i], b->lines[i - 1]);
+    b->numLines++;
+    strcpy(b->lines[b->curRow + 1], &b->lines[b->curRow][b->curCol]);
+    b->lines[b->curRow][b->curCol] = '\0';
+    b->curRow++;
+    b->curCol = 0;
+}
+
+static void buf_backspace(Buffer *b) {
+    if (b->curCol > 0) {
+        int len = (int)strlen(b->lines[b->curRow]);
+        memmove(&b->lines[b->curRow][b->curCol - 1],
+                &b->lines[b->curRow][b->curCol],
+                len - b->curCol + 1);
+        b->curCol--;
+    } else if (b->curRow > 0) {
+        int prevLen = (int)strlen(b->lines[b->curRow - 1]);
+        int len = (int)strlen(b->lines[b->curRow]);
+        if (prevLen + len < LINE_LEN) {
+            strcat(b->lines[b->curRow - 1], b->lines[b->curRow]);
+            for (int i = b->curRow; i < b->numLines - 1; i++)
+                strcpy(b->lines[i], b->lines[i + 1]);
+            b->numLines--;
+            b->curRow--;
+            b->curCol = prevLen;
+        }
+    }
+}
+
+static void buf_deleteChar(Buffer *b) {
+    int len = (int)strlen(b->lines[b->curRow]);
+    if (b->curCol < len) {
+        memmove(&b->lines[b->curRow][b->curCol],
+                &b->lines[b->curRow][b->curCol + 1],
+                len - b->curCol);
+    } else if (b->curRow < b->numLines - 1 &&
+               len + (int)strlen(b->lines[b->curRow + 1]) < LINE_LEN) {
+        strcat(b->lines[b->curRow], b->lines[b->curRow + 1]);
+        for (int i = b->curRow + 1; i < b->numLines - 1; i++)
+            strcpy(b->lines[i], b->lines[i + 1]);
+        b->numLines--;
+    }
+}
+
+static int buf_load(Buffer *b, const char *path) {
+    FILE *f = fopen(path, "r");
+    b->numLines = 0;
+    if (!f) { buf_init(b); return 0; }
+    while (b->numLines < MAX_LINES && fgets(b->lines[b->numLines], LINE_LEN, f)) {
+        b->lines[b->numLines][strcspn(b->lines[b->numLines], "\r\n")] = '\0';
+        b->numLines++;
+    }
+    fclose(f);
+    if (b->numLines == 0) buf_init(b);
+    return 1;
+}
+
+static int buf_save(const Buffer *b, const char *path) {
+    FILE *f = fopen(path, "w");
+    if (!f) return 0;
+    for (int i = 0; i < b->numLines; i++)
+        fprintf(f, "%s\n", b->lines[i]);
+    fclose(f);
+    return 1;
+}
+
+/* ---------- temas ---------- */
+
+typedef struct {
+    Color bg;       /* fundo do ecrã */
+    Color btn;      /* fundo dos botões */
+    Color btnText;  /* texto dos botões */
+    Color ink;      /* texto das linhas */
+    Color bar;      /* barras, cursor e moldura dos botões */
+    Color barText;  /* texto dentro das barras e letra do cursor */
+} Theme;
+
+static const Theme THEME_DARK = {
+    { 0, 0, 0, 255 },        /* fundo */
+    { 0, 0, 0, 255 },        /* botões */
+    { 51, 255, 102, 255 },   /* texto dos botões verde */
+    { 51, 255, 102, 255 },   /* texto das linhas verde fósforo */
+    { 51, 255, 102, 255 },   /* barras e cursor verdes */
+    { 0, 0, 0, 255 },        /* texto das barras preto */
+};
+
+static const Theme THEME_LIGHT = {
+    { 0, 0, 0, 255 },        /* fundo preto */
+    { 0, 0, 0, 255 },        /* botões pretos */
+    { 255, 255, 255, 255 },  /* texto dos botões branco */
+    { 255, 255, 255, 255 },  /* texto das linhas branco */
+    { 35, 35, 35, 255 },     /* barras e cursor cinzentos */
+    { 255, 255, 255, 255 },  /* texto das barras branco */
+};
+
+static const Theme *th = &THEME_DARK;
+static bool lightTheme = false;
+
+/* ---------- estado ---------- */
+
 static char filename[MAX_PATH_LEN] = "SEMNOME.TXT";
 static char status[64] = "PRONTO";
 
@@ -39,8 +162,12 @@ static void setStatus(const char *msg) {
 }
 
 static void clampCol(void) {
-    int len = (int)strlen(lines[curRow]);
-    if (curCol > len) curCol = len;
+    int len = (int)strlen(buf.lines[buf.curRow]);
+    if (buf.curCol > len) buf.curCol = len;
+}
+
+static Rectangle btnThemeRect(void) {
+    return (Rectangle){ 44 * CW, BTN_ROW * CH, BTN_COLS * CW, CH };
 }
 
 static Rectangle btnOpenRect(void) {
@@ -49,6 +176,12 @@ static Rectangle btnOpenRect(void) {
 
 static Rectangle btnNewRect(void) {
     return (Rectangle){ 59 * CW, BTN_ROW * CH, BTN_COLS * CW, CH };
+}
+
+static void toggleTheme(void) {
+    lightTheme = !lightTheme;
+    th = lightTheme ? &THEME_LIGHT : &THEME_DARK;
+    setStatus(lightTheme ? "TEMA CLARO" : "TEMA ESCURO");
 }
 
 /* ---------- diálogo do sistema ---------- */
@@ -91,44 +224,21 @@ static bool fileDialog(char *out, size_t size, bool save) {
 /* ---------- ficheiros ---------- */
 
 static void loadFile(const char *path) {
-    FILE *f = fopen(path, "r");
     snprintf(filename, sizeof filename, "%s", path);
-    numLines = 0;
-
-    if (f) {
-        while (numLines < MAX_LINES && fgets(lines[numLines], LINE_LEN, f)) {
-            lines[numLines][strcspn(lines[numLines], "\r\n")] = '\0';
-            numLines++;
-        }
-        fclose(f);
-        setStatus("LIDO");
-    } else {
-        setStatus("NOVO FICHEIRO");
-    }
-
-    if (numLines == 0) {
-        lines[0][0] = '\0';
-        numLines = 1;
-    }
+    if (buf_load(&buf, path)) setStatus("LIDO");
+    else                      setStatus("NOVO FICHEIRO");
 }
 
 static void saveFile(void) {
-    FILE *f = fopen(filename, "w");
-    if (!f) {
-        setStatus("ERRO AO GRAVAR");
-        return;
-    }
-    for (int i = 0; i < numLines; i++)
-        fprintf(f, "%s\n", lines[i]);
-    fclose(f);
-    setStatus("GRAVADO");
+    if (buf_save(&buf, filename)) setStatus("GRAVADO");
+    else                          setStatus("ERRO AO GRAVAR");
 }
 
 static void openAction(void) {
     char path[MAX_PATH_LEN];
     if (fileDialog(path, sizeof path, false)) {
         loadFile(path);
-        curRow = curCol = topRow = 0;
+        buf.curRow = buf.curCol = buf.topRow = 0;
     }
 }
 
@@ -145,62 +255,8 @@ static void newAction(void) {
     fclose(f);
 
     snprintf(filename, sizeof filename, "%s", path);
-    lines[0][0] = '\0';
-    numLines = 1;
-    curRow = curCol = topRow = 0;
+    buf_init(&buf);
     setStatus("NOVO FICHEIRO");
-}
-
-/* ---------- edição ---------- */
-
-static void insertChar(int c) {
-    int len = (int)strlen(lines[curRow]);
-    if (len >= LINE_LEN - 1 || c < 32 || c > 126) return;
-    memmove(&lines[curRow][curCol + 1], &lines[curRow][curCol], len - curCol + 1);
-    lines[curRow][curCol] = (char)c;
-    curCol++;
-}
-
-static void newLine(void) {
-    if (numLines >= MAX_LINES) return;
-    for (int i = numLines; i > curRow + 1; i--)
-        strcpy(lines[i], lines[i - 1]);
-    numLines++;
-    strcpy(lines[curRow + 1], &lines[curRow][curCol]);
-    lines[curRow][curCol] = '\0';
-    curRow++;
-    curCol = 0;
-}
-
-static void backspace(void) {
-    if (curCol > 0) {
-        int len = (int)strlen(lines[curRow]);
-        memmove(&lines[curRow][curCol - 1], &lines[curRow][curCol], len - curCol + 1);
-        curCol--;
-    } else if (curRow > 0) {
-        int prevLen = (int)strlen(lines[curRow - 1]);
-        int len = (int)strlen(lines[curRow]);
-        if (prevLen + len < LINE_LEN) {
-            strcat(lines[curRow - 1], lines[curRow]);
-            for (int i = curRow; i < numLines - 1; i++)
-                strcpy(lines[i], lines[i + 1]);
-            numLines--;
-            curRow--;
-            curCol = prevLen;
-        }
-    }
-}
-
-static void deleteChar(void) {
-    int len = (int)strlen(lines[curRow]);
-    if (curCol < len) {
-        memmove(&lines[curRow][curCol], &lines[curRow][curCol + 1], len - curCol);
-    } else if (curRow < numLines - 1 && len + (int)strlen(lines[curRow + 1]) < LINE_LEN) {
-        strcat(lines[curRow], lines[curRow + 1]);
-        for (int i = curRow + 1; i < numLines - 1; i++)
-            strcpy(lines[i], lines[i + 1]);
-        numLines--;
-    }
 }
 
 /* ---------- desenho ---------- */
@@ -216,51 +272,49 @@ static void putStr(int col, int row, const char *s, Color c) {
 }
 
 static void drawButton(Rectangle r, const char *label) {
-    DrawRectangleRec(r, PHOS_BG);
-    DrawRectangleLinesEx(r, 1, PHOS_BG);
-    putStr((int)(r.x / CW), BTN_ROW, label, PHOS);
+    DrawRectangleRec(r, th->btn);
+    DrawRectangleLinesEx(r, 1, th->bar);
+    putStr((int)(r.x / CW), BTN_ROW, label, th->btnText);
 }
 
 static void drawScreen(bool cursorOn) {
     /* cabeçalho invertido */
-    DrawRectangle(0, 0, SCR_COLS * CW, CH, PHOS);
-    putStr(1, 0, "ED-11 EDITOR  CTRL+S GRAVAR  ESC SAIR", PHOS_BG);
+    DrawRectangle(0, 0, SCR_COLS * CW, CH, th->bar);
+    putStr(1, 0, "ED-11 EDITOR  CTRL+S GRAVAR  ESC SAIR", th->barText);
 
     /* botões */
-    Vector2 m = GetMousePosition();
-    bool overOpen = CheckCollisionPointRec(m, btnOpenRect());
-    bool overNew  = CheckCollisionPointRec(m, btnNewRect());
-    drawButton(btnOpenRect(), overOpen ? " ABRIR " : " ABRIR ");
-    drawButton(btnNewRect(),  overNew  ? " NOVO "  : " NOVO ");
+    drawButton(btnThemeRect(), " TEMA ");
+    drawButton(btnOpenRect(),  " ABRIR ");
+    drawButton(btnNewRect(),   " NOVO ");
 
     /* área de edição */
     for (int r = 0; r < EDIT_ROWS; r++) {
-        int li = topRow + r;
-        if (li >= numLines) break;
-        putStr(0, r + 1, lines[li], PHOS);
+        int li = buf.topRow + r;
+        if (li >= buf.numLines) break;
+        putStr(0, r + 1, buf.lines[li], th->ink);
     }
 
     /* cursor */
     if (cursorOn) {
-        int sy = curRow - topRow + 1;
+        int sy = buf.curRow - buf.topRow + 1;
         if (sy >= 1 && sy <= EDIT_ROWS) {
-            char under = lines[curRow][curCol];
+            char under = buf.lines[buf.curRow][buf.curCol];
             if (under == '\0') under = ' ';
-            DrawRectangle(curCol * CW, sy * CH, CW, CH, PHOS);
+            DrawRectangle(buf.curCol * CW, sy * CH, CW, CH, th->bar);
             char b[2] = { under, '\0' };
 #if UPPERCASE_ONLY
             b[0] = (char)toupper((unsigned char)b[0]);
 #endif
-            DrawText(b, curCol * CW, sy * CH, 20, PHOS_BG);
+            DrawText(b, buf.curCol * CW, sy * CH, 20, th->barText);
         }
     }
 
     /* barra de estado */
-    char st[SCR_COLS + 1];
+    char st[MAX_PATH_LEN + 128];
     snprintf(st, sizeof st, " %s  LIN %d/%d  COL %d  %s",
-             filename, curRow + 1, numLines, curCol + 1, status);
-    DrawRectangle(0, (SCR_ROWS - 1) * CH, SCR_COLS * CW, CH, PHOS);
-    putStr(0, SCR_ROWS - 1, st, PHOS_BG);
+             filename, buf.curRow + 1, buf.numLines, buf.curCol + 1, status);
+    DrawRectangle(0, (SCR_ROWS - 1) * CH, SCR_COLS * CW, CH, th->bar);
+    putStr(0, SCR_ROWS - 1, st, th->barText);
 
     /* linhas de varrimento */
     for (int y = 0; y < SCR_ROWS * CH; y += 3)
@@ -278,58 +332,67 @@ static void editorLoop(void) {
         /* cliques nos botões */
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             Vector2 m = GetMousePosition();
-            if (CheckCollisionPointRec(m, btnOpenRect())) openAction();
-            if (CheckCollisionPointRec(m, btnNewRect()))  newAction();
+            if (CheckCollisionPointRec(m, btnThemeRect())) toggleTheme();
+            if (CheckCollisionPointRec(m, btnOpenRect()))  openAction();
+            if (CheckCollisionPointRec(m, btnNewRect()))   newAction();
         }
 
-        /* texto escrito */
-        if (!ctrl) {
-            int c;
-            while ((c = GetCharPressed()) != 0)
-                insertChar(c);
+        /* texto escrito: esvazia sempre a fila, mas só insere se Ctrl não estiver premido */
+        int c;
+        while ((c = GetCharPressed()) != 0) {
+            if (!ctrl) buf_insertChar(&buf, c);
         }
 
         /* atalhos */
         if (ctrl && IsKeyPressed(KEY_S)) saveFile();
         if (ctrl && IsKeyPressed(KEY_O)) openAction();
         if (ctrl && IsKeyPressed(KEY_N)) newAction();
+        if (ctrl && IsKeyPressed(KEY_T)) toggleTheme();
         if (IsKeyPressed(KEY_ESCAPE))    running = false;
 
         /* edição */
-        if (PRESSED(KEY_ENTER))     newLine();
-        if (PRESSED(KEY_BACKSPACE)) backspace();
-        if (PRESSED(KEY_DELETE))    deleteChar();
-        if (PRESSED(KEY_TAB)) for (int i = 0; i < 4; i++) insertChar(' ');
+        if (PRESSED(KEY_ENTER))     buf_newLine(&buf);
+        if (PRESSED(KEY_BACKSPACE)) buf_backspace(&buf);
+        if (PRESSED(KEY_DELETE))    buf_deleteChar(&buf);
+        if (PRESSED(KEY_TAB))
+            for (int i = 0; i < 4; i++) buf_insertChar(&buf, ' ');
 
         /* movimento */
-        if (PRESSED(KEY_UP) && curRow > 0) {
-            curRow--;
+        if (PRESSED(KEY_UP) && buf.curRow > 0) {
+            buf.curRow--;
             clampCol();
         }
-        if (PRESSED(KEY_DOWN) && curRow < numLines - 1) {
-            curRow++;
+        if (PRESSED(KEY_DOWN) && buf.curRow < buf.numLines - 1) {
+            buf.curRow++;
             clampCol();
         }
         if (PRESSED(KEY_LEFT)) {
-            if (curCol > 0) curCol--;
-            else if (curRow > 0) { curRow--; curCol = (int)strlen(lines[curRow]); }
+            if (buf.curCol > 0) buf.curCol--;
+            else if (buf.curRow > 0) {
+                buf.curRow--;
+                buf.curCol = (int)strlen(buf.lines[buf.curRow]);
+            }
         }
         if (PRESSED(KEY_RIGHT)) {
-            int len = (int)strlen(lines[curRow]);
-            if (curCol < len) curCol++;
-            else if (curRow < numLines - 1) { curRow++; curCol = 0; }
+            int len = (int)strlen(buf.lines[buf.curRow]);
+            if (buf.curCol < len) buf.curCol++;
+            else if (buf.curRow < buf.numLines - 1) {
+                buf.curRow++;
+                buf.curCol = 0;
+            }
         }
-        if (PRESSED(KEY_HOME)) curCol = 0;
-        if (PRESSED(KEY_END))  curCol = (int)strlen(lines[curRow]);
+        if (PRESSED(KEY_HOME)) buf.curCol = 0;
+        if (PRESSED(KEY_END))  buf.curCol = (int)strlen(buf.lines[buf.curRow]);
 
         /* manter o cursor visível */
-        if (curRow < topRow) topRow = curRow;
-        if (curRow >= topRow + EDIT_ROWS) topRow = curRow - EDIT_ROWS + 1;
+        if (buf.curRow < buf.topRow) buf.topRow = buf.curRow;
+        if (buf.curRow >= buf.topRow + EDIT_ROWS)
+            buf.topRow = buf.curRow - EDIT_ROWS + 1;
 
         bool cursorOn = ((int)(GetTime() * 2) % 2) == 0;
 
         BeginDrawing();
-        ClearBackground(PHOS_BG);
+        ClearBackground(th->bg);
         drawScreen(cursorOn);
         EndDrawing();
     }
@@ -338,7 +401,9 @@ static void editorLoop(void) {
 int main(int argc, char **argv) {
     InitWindow(SCR_COLS * CW, SCR_ROWS * CH, "ED-11");
     SetTargetFPS(60);
+    ToggleFullscreen();
 
+    buf_init(&buf);
     if (argc > 1) loadFile(argv[1]);
     else          loadFile(filename);
 
