@@ -21,7 +21,7 @@
 #define MAX_LINES      1000
 #define LINE_LEN       256
 #define MAX_PATH_LEN   512
-#define UPPERCASE_ONLY 1
+#define UPPERCASE_ONLY 0
 
 #define PRESSED(k) (IsKeyPressed(k) || IsKeyPressedRepeat(k))
 
