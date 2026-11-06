@@ -346,8 +346,7 @@ static void newAction(void) {
     setStatus("NOVO FICHEIRO");
 }
 
-/* pede confirmação, se houver alterações por gravar: a primeira vez avisa,
-   a segunda vez (a mesma ação) avança */
+
 static bool confirmDiscard(Action a) {
     if (!dirty) return true;
     if (pendingDiscard == a) {
