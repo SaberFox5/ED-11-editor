@@ -524,7 +524,7 @@ static void normalKeys(bool ctrl) {
     if (PRESSED(KEY_DOWN) && buf.curRow < buf.numLines - 1) {
         buf.curRow++;
         clampCol();
-    }
+    }  /*---apenas para mover o cursor para a esquerda---*/
     if (PRESSED(KEY_LEFT)) {
         if (buf.curCol > 0) buf.curCol--;
         else if (buf.curRow > 0) {
